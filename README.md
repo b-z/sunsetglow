@@ -1,12 +1,12 @@
 # sunsetglow
 
 开源的朝霞/晚霞（火烧云）预报，思路来自 sunsetbot 公开的《火烧云预报教程》第一至四章。
-与 sunsetbot 无隶属关系。指数只在 20 次上海实况上做过**初步校准**（见下文）。
+与 sunsetbot 无隶属关系。指数在 20 次上海实况和 87 次加州摄像头实况上做过**初步校准**（见下文）。
 
 ```bash
 python3 sunsetglow.py 31.23 121.47                      # 上海今天晚霞
 python3 sunsetglow.py 35.68 139.76 --event sunrise --date 2026-10-29 --png out.png
-python3 sunsetglow.py 31.23 121.47 --model ecmwf_ifs025 # 换 EC
+python3 sunsetglow.py 31.23 121.47 --model ecmwf_ifs025 # 换 EC（默认 gfs025）
 python3 test_synthetic.py                               # 离线合成场景自检
 ```
 
@@ -65,6 +65,28 @@ date,lat,lon,event,observed,source,note
 - 指数刻度按这次回测重定：「≥小烧」的最佳切分约 1.1，「≥中烧」约 1.5，地图分级随之调整。
 - 局限：这段时间 CAMS 气溶胶存档还没开始（约 2022-08 起），AOD 用的是缺省值 0.2；
   sunsetbot 的对照预报是事后用 ERA5 再分析算的，比真实预报占便宜；10 天、一个城市，远不够。
+
+### 第二次实测：PhenoCam 加州（2026-10-29）
+
+数据：[PhenoCam](https://phenocam.nau.edu) 研究用网络摄像头的公开存档。选了两个朝西、天空开阔、黄昏曝光正常的
+加州湿地站点（hillslough、eastend），2022-09 至 2025-08 随机抽日期，取日落后 3–35 分钟的帧，
+由 Claude 逐张目测评 0–4 级，共 87 次（7 次 ≥2）：[labels/phenocam_california.csv](labels/phenocam_california.csv)，
+生成工具 [tools/phenocam_labels.py](tools/phenocam_labels.py)。这段时间有真实 CAMS AOD。
+
+| 云块尺度 | Spearman | AUC（≥小烧） |
+|---|---|---|
+| 0（均匀铺开） | +0.26 | 0.67 |
+| 10 km | +0.39 | 0.79 |
+| **30 km（默认）** | +0.44 | **0.85** |
+| 100 km | +0.46 | 0.83 |
+
+- 在独立数据上，云块模型同样明显好于均匀铺开，30 km 基本就是最优，支持之前的保守取值。
+- **默认模式改为 `gfs025`**：Open-Meteo 的 `gfs_seamless` 在美国混入 HRRR，它的分层云量几乎没有高云，
+  3 次大烧当天指数都是 0；纯 GFS 给出 0.6–1.3。ECMWF（`ecmwf_ifs025`）3 次漏了 2 次。中国境内两者相同。
+- 档位还不一致：加州「≥小烧」的最佳切分约 0.4，上海约 1.1。可能原因：评级人和视野不同
+  （摄像头只拍一个方向、30 分钟一帧）、气候不同。地图档位暂时沿用上海的。
+- 自动按颜色打分不可用：晴天暮光带和真正的云霞分不开，所以改为人工目测，标签带评级人主观性。
+- 试过但放弃的站点：meadpasturesw、saskatoon1（天空过曝）、laudernz01（过曝、黄昏全黑）。
 
 ## 方法
 

@@ -37,9 +37,12 @@ def cached_request(url, params):
         full = url + "?" + urllib.parse.urlencode(p, safe=",")
         path = os.path.join(CACHE_DIR, hashlib.sha1(full.encode()).hexdigest() + ".json")
         if os.path.exists(path):
-            with open(path) as f:
-                out += json.load(f)
-            continue
+            try:
+                with open(path) as f:
+                    out += json.load(f)
+                continue
+            except ValueError:  # truncated by an interrupted run: refetch
+                os.remove(path)
         for attempt in range(6):
             try:
                 data = sg.http_json(url, p)
@@ -50,8 +53,10 @@ def cached_request(url, params):
                 print("  rate limited, waiting 65 s ...", file=sys.stderr)
                 time.sleep(65)
         os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(path, "w") as f:
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w") as f:
             json.dump(data, f)
+        os.replace(tmp, path)  # atomic, so readers never see a half-written file
         out += data
         print("  fetched %s %d/%d" % (url.split("/")[2], min(i + CHUNK, len(lats)), len(lats)), file=sys.stderr)
     return out
@@ -185,7 +190,7 @@ def main():
     ap.add_argument("--field-step", type=float, default=0.5, help="model field resolution, degrees (default 0.5)")
     ap.add_argument("--event", choices=["sunset", "sunrise"], default="sunset")
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
-    ap.add_argument("--model", default="gfs_seamless")
+    ap.add_argument("--model", default="gfs025")
     ap.add_argument("--haze-height", type=float, default=1.0)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--out", default="map.html")

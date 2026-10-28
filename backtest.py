@@ -113,11 +113,12 @@ def floats(text):
 def main():
     ap = argparse.ArgumentParser(description="Calibrate the sunsetglow index against observed glow labels.")
     ap.add_argument("labels", help="labels CSV (date,lat,lon,event,observed[,source,note])")
-    ap.add_argument("--model", default="gfs_seamless")
+    ap.add_argument("--model", default="gfs025")
     ap.add_argument("--haze-heights", type=floats, default=[1.0, 1.5, 2.5], help="aerosol scale heights to try, km")
     ap.add_argument("--beta-scales", type=floats, default=[1.0], help="cloud extinction multipliers to try")
     ap.add_argument("--element-kms", type=floats, default=[0.0, 10.0, 30.0, 100.0],
                     help="cloud element sizes to try, km (0 = uniform c*beta, the old model)")
+    ap.add_argument("--good", type=float, default=2.0, help="observed grade counted as positive for AUC (default 2)")
     ap.add_argument("--fast", action="store_true", help="coarser time/angle steps (map settings)")
     ap.add_argument("--out", default="backtest_results.csv")
     args = ap.parse_args()
@@ -127,11 +128,11 @@ def main():
     columns = make_columns(args.model, memo)
     steps = dict(offsets=glowmap.MAP_OFFSETS, angles=glowmap.MAP_ANGLES) if args.fast else {}
     observed = [r["observed"] for r in rows]
-    good = [o >= 2 for o in observed]
-    print("%d labelled events, %d with observed >= 2" % (len(rows), sum(good)))
+    good = [o >= args.good for o in observed]
+    print("%d labelled events, %d with observed >= %g" % (len(rows), sum(good), args.good))
     base = [r["baseline"] for r in rows]
     if all(b is not None for b in base):
-        print("baseline forecaster: spearman %+.2f   AUC(>=2) %.2f" % (spearman(base, observed), auc(base, good)))
+        print("baseline forecaster: spearman %+.2f   AUC %.2f" % (spearman(base, observed), auc(base, good)))
 
     results = []
     for haze, beta, elem in itertools.product(args.haze_heights, args.beta_scales, args.element_kms):
@@ -143,7 +144,7 @@ def main():
             scores.append(f["index"])
         rho, a = spearman(scores, observed), auc(scores, good)
         results.append((rho, a, haze, beta, elem, scores))
-        print("  haze %.1f km  beta x%.1f  element %4.0f km   spearman %+.2f   AUC(>=2) %.2f"
+        print("  haze %.1f km  beta x%.1f  element %4.0f km   spearman %+.2f   AUC %.2f"
               % (haze, beta, elem, rho, a), file=sys.stderr)
 
     # NaN-safe ranking: Spearman first, AUC as tie-break

@@ -5,3 +5,4 @@ __pycache__/
 map_*.html
 !map_template.html
 backtest_results.csv
+.venv/

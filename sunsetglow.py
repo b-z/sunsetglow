@@ -24,6 +24,7 @@ import json
 import math
 import struct
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,7 +38,7 @@ ANGSTROM = 1.3  # aerosol extinction ~ lambda^-ANGSTROM
 CLOUD_BETA_SCALE = 1.0  # multiplier on cloud extinction; tuned by backtest.py
 # horizontal size of cloud elements in a partly cloudy layer. Backtest on 20 sunsetbot-graded Shanghai
 # events (2022-06/07) improved monotonically up to 100 km (Spearman 0.39 at 0 -> 0.63 at 30 -> 0.76 at 100);
-# 30 km is a conservative choice until there is more data.
+# on 87 eye-graded PhenoCam California events 30 km was about the best (AUC 0.67 at 0 -> 0.85 at 30, 0.83 at 100).
 CLOUD_ELEMENT_KM = 30.0
 LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200)
 
@@ -114,8 +115,17 @@ def destination(lat, lon, azimuth, dist_km):
 def http_json(url, params):
     full = url + "?" + urllib.parse.urlencode(params, safe=",")
     try:
-        with urllib.request.urlopen(full, timeout=60) as r:
-            data = json.load(r)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(full, timeout=60) as r:
+                    data = json.load(r)
+                break
+            except urllib.error.HTTPError:
+                raise
+            except (urllib.error.URLError, TimeoutError):  # transient network trouble
+                if attempt == 2:
+                    raise
+                time.sleep(5 * (attempt + 1))
     except urllib.error.HTTPError as e:
         if e.code == 429:
             raise SystemExit("Open-Meteo rate limit hit (HTTP 429); each run costs ~60 weighted calls. Wait a minute and retry.")
@@ -516,7 +526,7 @@ def main():
     ap.add_argument("lon", type=float)
     ap.add_argument("--event", choices=["sunset", "sunrise"], default="sunset")
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
-    ap.add_argument("--model", default="gfs_seamless", help="Open-Meteo model, e.g. gfs_seamless, ecmwf_ifs025")
+    ap.add_argument("--model", default="gfs025", help="Open-Meteo model (default gfs025: pure GFS; gfs_seamless blends in HRRR over the US, which misses high cloud), e.g. ecmwf_ifs025")
     ap.add_argument("--haze-height", type=float, default=1.0, help="aerosol scale height km (default 1.0, from backtest)")
     ap.add_argument("--png", help="write a panorama PNG (time x meridian angle)")
     args = ap.parse_args()

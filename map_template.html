@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>火烧云预报图</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f4f1; --panel: rgba(255,255,255,.94); --text: #1d1b1a; --muted: #6b6560; --line: #e2ddd7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121214; --panel: rgba(28,28,32,.94); --text: #eeeae6; --muted: #9a948e; --line: #34323a;
+    }
+  }
+  :root[data-theme="dark"] { --bg: #121214; --panel: rgba(28,28,32,.94); --text: #eeeae6; --muted: #9a948e; --line: #34323a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "PingFang SC", "Hiragino Sans", system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; background: var(--bg); }
+  .panel { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px; box-shadow: 0 4px 18px rgba(0,0,0,.18); }
+  #info { top: 12px; left: 12px; max-width: 300px; }
+  #info h1 { font-size: 17px; margin: 0 0 2px; }
+  #info .sub { color: var(--muted); font-size: 12.5px; }
+  #legend { bottom: 18px; left: 12px; font-size: 12px; }
+  .scale { display: flex; margin: 6px 0 2px; }
+  .scale span { width: 34px; height: 10px; }
+  .ticks { display: flex; justify-content: space-between; width: 204px; color: var(--muted); }
+  .note { color: var(--muted); font-size: 11.5px; margin-top: 6px; max-width: 260px; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
+  .pop b { font-size: 20px; }
+  .pop table { border-collapse: collapse; margin-top: 4px; }
+  .pop td { padding: 1px 8px 1px 0; vertical-align: top; }
+  .pop td:first-child { color: var(--muted); }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+  .pop code { font-size: 11px; color: var(--muted); word-break: break-all; }
+  @media (max-width: 520px) { #info { right: 12px; max-width: none; } #legend { bottom: 12px; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="info" class="panel">
+  <h1 id="title">火烧云预报图</h1>
+  <div class="sub" id="sub"></div>
+  <div class="sub" id="best" style="margin-top:6px"></div>
+</div>
+<div id="legend" class="panel">
+  <div>鲜艳度指数（未校准）</div>
+  <div class="scale" id="scale"></div>
+  <div class="ticks"><span>0.05</span><span>0.3</span><span>0.6</span><span>1</span><span>1.5</span><span>2+</span></div>
+  <div class="note">GFS/EC 云量 + CAMS 气溶胶，沿太阳方位做 2D 光线追踪。点击格子看详情。与 sunsetbot 无关。</div>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+const STOPS = [[0.05, "#f7e08b"], [0.3, "#ffb347"], [0.6, "#ff7a2f"], [1.0, "#e8432e"], [1.5, "#c2185b"], [2.0, "#7b1fa2"]];
+const LEVELS = [[0.05, "无"], [0.3, "微烧"], [0.6, "小烧"], [1.0, "中烧"], [1.5, "较大烧"], [Infinity, "大烧"]];
+
+function colorFor(v) {
+  if (v < STOPS[0][0]) return null;
+  for (let i = STOPS.length - 1; i >= 0; i--) if (v >= STOPS[i][0]) return STOPS[i][1];
+}
+function levelFor(v) { for (const [t, name] of LEVELS) if (v < t) return name; }
+function localTime(iso, offsetMin) {
+  const d = new Date(Date.parse(iso) + offsetMin * 60000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+const m = DATA.meta;
+const evName = m.event === "sunset" ? "晚霞" : "朝霞";
+document.getElementById("title").textContent = `${m.date} ${evName}预报`;
+document.getElementById("sub").textContent =
+  `模式 ${m.model} · 网格 ${m.step}° · 生成于 ${new Date(m.generated).toLocaleString()}`;
+document.getElementById("scale").innerHTML = STOPS.map(s => `<span style="background:${s[1]}"></span>`).join("");
+
+const [S, N, W, E] = m.bbox;
+const map = L.map("map", { preferCanvas: true, zoomSnap: 0.25 }).fitBounds([[S, W], [N, E]]);
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+const tone = dark ? "Dark" : "Light";
+const esri = layer => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${tone}_Gray_${layer}/MapServer/tile/{z}/{y}/{x}`;
+L.tileLayer(esri("Base"), {
+  attribution: "底图 &copy; Esri · 数据 Open-Meteo (GFS/ECMWF), CAMS", maxZoom: 16,
+}).addTo(map);
+// labels above the glow cells
+map.createPane("labels").style.zIndex = 650;
+map.getPane("labels").style.pointerEvents = "none";
+L.tileLayer(esri("Reference"), { pane: "labels", maxZoom: 16 }).addTo(map);
+
+function popup(c) {
+  // c.peak is signed clock offset from the event: negative = earlier
+  const ev = m.event === "sunset" ? "日落" : "日出";
+  const rel = c.peak === 0 ? ev + "时" : `${ev}${c.peak > 0 ? "后" : "前"} ${Math.abs(c.peak)} 分`;
+  const peak = c.lit ? `${localTime(c.event, c.peak)}（${rel}）` : "—";
+  return `<div class="pop"><b>${c.index.toFixed(2)}</b> ${levelFor(c.index)}
+    <table>
+      <tr><td>${m.event === "sunset" ? "日落" : "日出"}</td><td>${localTime(c.event, 0)}</td></tr>
+      <tr><td>持续</td><td>${c.duration ? "约 " + c.duration + " 分钟" : "—"}</td></tr>
+      <tr><td>峰值</td><td>${peak}</td></tr>
+      <tr><td>颜色</td><td>${c.color ? `<span class="sw" style="background:${c.color}"></span>${c.hue}` : "—"}</td></tr>
+      <tr><td>AOD</td><td>${c.aod.toFixed(2)}</td></tr>
+      <tr><td>位置</td><td>${c.lat.toFixed(2)}, ${c.lon.toFixed(2)}</td></tr>
+    </table>
+    <code>python3 sunsetglow.py ${c.lat} ${c.lon} --event ${m.event} --date ${m.date} --model ${m.model} --png out.png</code>
+  </div>`;
+}
+
+const h = m.step / 2;
+for (const c of DATA.cells) {
+  const col = colorFor(c.index);
+  if (!col) continue;
+  L.rectangle([[c.lat - h, c.lon - h], [c.lat + h, c.lon + h]], {
+    stroke: false, fillColor: col, fillOpacity: Math.min(0.35 + c.index * 0.25, 0.8),
+    interactive: false,
+  }).addTo(map);
+}
+// one click handler for all cells, including those without glow
+map.on("click", e => {
+  let best = null, bd = Infinity;
+  for (const c of DATA.cells) {
+    const d = (c.lat - e.latlng.lat) ** 2 + (c.lon - e.latlng.lng) ** 2;
+    if (d < bd) { bd = d; best = c; }
+  }
+  if (best && bd <= (m.step * 0.75) ** 2) L.popup().setLatLng([best.lat, best.lon]).setContent(popup(best)).openOn(map);
+});
+
+const best = [...DATA.cells].sort((a, b) => b.index - a.index).filter(c => c.index >= 0.05).slice(0, 3);
+document.getElementById("best").innerHTML = best.length
+  ? "最佳：" + best.map(c => `${c.lat.toFixed(2)},${c.lon.toFixed(2)} <b>${c.index.toFixed(2)}</b>`).join(" · ")
+  : "本区域预计无明显火烧云";
+</script>
+</body>
+</html>

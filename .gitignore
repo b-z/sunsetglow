@@ -1,0 +1,6 @@
+.cache/
+__pycache__/
+*.png
+# generated maps (the template is source)
+map_*.html
+!map_template.html

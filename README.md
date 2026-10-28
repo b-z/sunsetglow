@@ -61,3 +61,7 @@ cirrus 9 km, no edge (overcast)    index 0.02   ← 无云边界，光进不来
 
 - 天气：[Open-Meteo](https://open-meteo.com/)（NOAA GFS、ECMWF IFS），CC BY 4.0
 - 气溶胶：CAMS Global，经 Open-Meteo Air Quality API
+
+## 许可证
+
+GPL-3.0-or-later，见 [LICENSE](LICENSE)。

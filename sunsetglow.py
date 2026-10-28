@@ -34,6 +34,7 @@ LAMBDAS = (650.0, 550.0, 450.0)  # R, G, B in nm
 K_RAYLEIGH_550 = 0.0116  # sea-level Rayleigh extinction at 550 nm, km^-1 (visibility ~ 336 km)
 H_RAYLEIGH = 8.0  # km
 ANGSTROM = 1.3  # aerosol extinction ~ lambda^-ANGSTROM
+CLOUD_BETA_SCALE = 1.0  # multiplier on cloud extinction; tuned by backtest.py
 LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200)
 
 X_MIN, X_MAX, DX = -300.0, 700.0, 10.0  # cross-section along sun azimuth, km (+ = toward sun)
@@ -145,7 +146,12 @@ def isa_level(p_hpa):
     return z, 15.0 - 6.5 * min(z, 11.0)
 
 
-def fetch_raw(points, t0, t1, model, levels=LEVELS, request=None, cloud_only=False):
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+# archived past forecasts (same variables), used for backtesting
+HISTORICAL_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+
+
+def fetch_raw(points, t0, t1, model, levels=LEVELS, request=None, cloud_only=False, url=FORECAST_URL):
     """Hourly level data + AOD for points between UTC t0 and t1.
 
     Returns one dict per point: {"times", "hourly", "atimes", "aod"}.
@@ -165,10 +171,10 @@ def fetch_raw(points, t0, t1, model, levels=LEVELS, request=None, cloud_only=Fal
             hourly += ["geopotential_height_%dhPa" % lv, "temperature_%dhPa" % lv]
     if cloud_only:
         hourly += ["temperature_%dhPa" % lv for lv in ANCHOR_LEVELS] + ["geopotential_height_500hPa"]
-    wx = request("https://api.open-meteo.com/v1/forecast", dict(base, models=model, hourly=",".join(hourly)))
+    wx = request(url, dict(base, models=model, hourly=",".join(hourly)))
     if all(v is None for v in wx[0]["hourly"]["cloud_cover_500hPa"]):
         # model without level cloud cover: fetch RH and derive cloud fraction
-        rh = request("https://api.open-meteo.com/v1/forecast", dict(
+        rh = request(url, dict(
             base, models=model, hourly=",".join("relative_humidity_%dhPa" % lv for lv in levels)))
         for w, r in zip(wx, rh):
             w["hourly"].update(r["hourly"])
@@ -234,10 +240,12 @@ def rh_to_cloud(rh, temp):
 def cloud_beta(temp):
     """Cloud extinction per km at full cover: dense liquid ~10, thin ice ~1."""
     if temp >= -15:
-        return 10.0
-    if temp <= -38:
-        return 1.0
-    return 10.0 + (temp + 15) / (-23.0) * (1.0 - 10.0)
+        beta = 10.0
+    elif temp <= -38:
+        beta = 1.0
+    else:
+        beta = 10.0 + (temp + 15) / (-23.0) * (1.0 - 10.0)
+    return beta * CLOUD_BETA_SCALE
 
 
 # ---------------------------------------------------------------- cross-section

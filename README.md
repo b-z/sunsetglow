@@ -27,6 +27,25 @@ python3 glowmap.py --bbox 33,38,136,142 --date 2026-10-29 --out map_kanto.html  
   不能删气压层：试过删掉 450/550 hPa，一层挡光的中云被删掉，指数从 0.29 变成 1.73。
 - 请求按 100 个点分块，缓存在 `.cache/`，遇到 429 自动等 65 秒；关东范围首次约 3 分钟。
 
+## 校准回测
+
+```bash
+python3 backtest.py labels.csv            # 默认扫 haze 高度 1/1.5/2.5 km × 云消光 ×0.5/1/2
+```
+
+`labels.csv` 每行一次实况观测：
+
+```csv
+date,lat,lon,event,observed,source,note
+2024-09-22,31.24,121.50,sunset,3,sunsetbot record,辐散云系
+```
+
+`observed` 取 0–4：0 无，1 微烧，2 小烧，3 中烧，4 大烧。脚本用 Open-Meteo 历史预报存档
+（当时的 GFS 预报，不是再分析）和 CAMS AOD 重算指数，输出 Spearman 相关、"≥小烧"的 AUC、
+最佳参数组合和各等级的指数阈值；逐条结果写到 `backtest_results.csv`。少于 30 条时只当冒烟测试。
+
+需要**有烧和没烧两类样本**，否则 AUC 无法计算。
+
 ## 方法
 
 | 步骤 | 做法 | 教程依据 |

@@ -4,3 +4,4 @@ __pycache__/
 # generated maps (the template is source)
 map_*.html
 !map_template.html
+backtest_results.csv

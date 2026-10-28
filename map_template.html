@@ -47,15 +47,16 @@
   <div class="sub" id="best" style="margin-top:6px"></div>
 </div>
 <div id="legend" class="panel">
-  <div>鲜艳度指数（未校准）</div>
+  <div>鲜艳度指数（初步校准，n=20）</div>
   <div class="scale" id="scale"></div>
-  <div class="ticks"><span>0.05</span><span>0.3</span><span>0.6</span><span>1</span><span>1.5</span><span>2+</span></div>
+  <div class="ticks"><span>0.3</span><span>0.6</span><span>1</span><span>1.5</span><span>2</span><span>2.5+</span></div>
   <div class="note">GFS/EC 云量 + CAMS 气溶胶，沿太阳方位做 2D 光线追踪。点击格子看详情。与 sunsetbot 无关。</div>
 </div>
 <script>
 const DATA = /*__DATA__*/null;
-const STOPS = [[0.05, "#f7e08b"], [0.3, "#ffb347"], [0.6, "#ff7a2f"], [1.0, "#e8432e"], [1.5, "#c2185b"], [2.0, "#7b1fa2"]];
-const LEVELS = [[0.05, "无"], [0.3, "微烧"], [0.6, "小烧"], [1.0, "中烧"], [1.5, "较大烧"], [Infinity, "大烧"]];
+// grades: 小烧 cut ~1.0 from the backtest on sunsetbot-graded Shanghai events (n=20); others interpolated
+const STOPS = [[0.3, "#f7e08b"], [0.6, "#ffb347"], [1.0, "#ff7a2f"], [1.5, "#e8432e"], [2.0, "#c2185b"], [2.5, "#7b1fa2"]];
+const LEVELS = [[0.3, "无"], [1.0, "微烧"], [1.5, "小烧"], [2.0, "中烧"], [Infinity, "大烧"]];
 
 function colorFor(v) {
   if (v < STOPS[0][0]) return null;
@@ -124,7 +125,7 @@ map.on("click", e => {
   if (best && bd <= (m.step * 0.75) ** 2) L.popup().setLatLng([best.lat, best.lon]).setContent(popup(best)).openOn(map);
 });
 
-const best = [...DATA.cells].sort((a, b) => b.index - a.index).filter(c => c.index >= 0.05).slice(0, 3);
+const best = [...DATA.cells].sort((a, b) => b.index - a.index).filter(c => c.index >= 0.3).slice(0, 3);
 document.getElementById("best").innerHTML = best.length
   ? "最佳：" + best.map(c => `${c.lat.toFixed(2)},${c.lon.toFixed(2)} <b>${c.index.toFixed(2)}</b>`).join(" · ")
   : "本区域预计无明显火烧云";

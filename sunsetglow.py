@@ -35,6 +35,10 @@ K_RAYLEIGH_550 = 0.0116  # sea-level Rayleigh extinction at 550 nm, km^-1 (visib
 H_RAYLEIGH = 8.0  # km
 ANGSTROM = 1.3  # aerosol extinction ~ lambda^-ANGSTROM
 CLOUD_BETA_SCALE = 1.0  # multiplier on cloud extinction; tuned by backtest.py
+# horizontal size of cloud elements in a partly cloudy layer. Backtest on 20 sunsetbot-graded Shanghai
+# events (2022-06/07) improved monotonically up to 100 km (Spearman 0.39 at 0 -> 0.63 at 30 -> 0.76 at 100);
+# 30 km is a conservative choice until there is more data.
+CLOUD_ELEMENT_KM = 30.0
 LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200)
 
 X_MIN, X_MAX, DX = -300.0, 700.0, 10.0  # cross-section along sun azimuth, km (+ = toward sun)
@@ -250,6 +254,24 @@ def cloud_beta(temp):
 
 # ---------------------------------------------------------------- cross-section
 
+def effective_extinction(c, beta):
+    """Mean extinction of a layer with cloud fraction c made of elements CLOUD_ELEMENT_KM wide.
+
+    Spreading c uniformly (c * beta) makes even 30% cover opaque to grazing sunlight
+    within a few km, although real broken cloud lets light through its gaps. Instead,
+    each element-sized step is clear with probability 1 - c and crosses one cloud
+    element (transmission exp(-beta * L)) otherwise.
+    """
+    if c <= 0 or beta <= 0:
+        return 0.0
+    L = CLOUD_ELEMENT_KM
+    if L <= 0:  # uniform spreading (the original model)
+        return c * beta
+    t = 1 - min(c, 1.0) * (1 - math.exp(-beta * L))
+    return beta if t <= 1e-12 else -math.log(t) / L
+
+
+
 class Section:
     def __init__(self, cols, xs):
         self.nx = int(round((X_MAX - X_MIN) / DX)) + 1
@@ -269,7 +291,7 @@ class Section:
                 c1, b1 = col_grid[j + 1][k]
                 c = c0 * (1 - f) + c1 * f
                 self.cf[i][k] = c
-                self.ext[i][k] = c * (b0 * (1 - f) + b1 * f)
+                self.ext[i][k] = effective_extinction(c, b0 * (1 - f) + b1 * f)
 
     @staticmethod
     def _column_at(col, z):
@@ -445,7 +467,7 @@ DEFAULT_ANGLES = [1 + 0.5 * i for i in range(357)]  # meridian arc 1..179 deg
 DEFAULT_OFFSETS = list(range(-10, 46, 2))  # minutes after sunset (before sunrise)
 
 
-def forecast(lat, lon, event, date, columns, haze_height=1.5, offsets=DEFAULT_OFFSETS,
+def forecast(lat, lon, event, date, columns, haze_height=1.0, offsets=DEFAULT_OFFSETS,
              angles=DEFAULT_ANGLES, verbose=False):
     """Glow forecast for one location.
 
@@ -472,8 +494,9 @@ def forecast(lat, lon, event, date, columns, haze_height=1.5, offsets=DEFAULT_OF
             print("  %+3d min  sun %5.1f°  glow coverage %5.1f%%" % (m * sign, elev, coverage[-1] * 100), file=sys.stderr)
 
     step = offsets[1] - offsets[0]
-    # full meridian arc lit for 3 min ~ 1.0; clean cirrus with a nearby edge ~ 1.4 (uncalibrated)
-    index = sum(c * step for c in coverage) / 3
+    # full meridian arc lit for 6 min ~ 1.0. Scaled so that the backtest cut for
+    # "small glow or better" (小烧) falls near 1.0; grades in map_template.html
+    index = sum(c * step for c in coverage) / 6
     lit = [m * sign for m, c in zip(offsets, coverage) if c > 0.02]
     peak_i = max(range(len(coverage)), key=lambda i: coverage[i])
     best = max(strip[peak_i], key=lambda p: pixel_glow(p)[0] * (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]))
@@ -494,7 +517,7 @@ def main():
     ap.add_argument("--event", choices=["sunset", "sunrise"], default="sunset")
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
     ap.add_argument("--model", default="gfs_seamless", help="Open-Meteo model, e.g. gfs_seamless, ecmwf_ifs025")
-    ap.add_argument("--haze-height", type=float, default=1.5, help="aerosol scale height km (default 1.5)")
+    ap.add_argument("--haze-height", type=float, default=1.0, help="aerosol scale height km (default 1.0, from backtest)")
     ap.add_argument("--png", help="write a panorama PNG (time x meridian angle)")
     args = ap.parse_args()
 

@@ -2,9 +2,11 @@
 """backtest — calibrate the sunsetglow index against observed glow.
 
 Input: a labels CSV with columns
-    date,lat,lon,event,observed[,source,note]
+    date,lat,lon,event,observed[,baseline,source,note]
 where date is the local date (YYYY-MM-DD), event is sunset|sunrise and
-observed is a 0-4 grade: 0 none, 1 faint (微烧), 2 small (小烧), 3 medium (中烧), 4 large (大烧).
+observed is a 0-4 grade: 0 none, 1 faint (微烧), 2 small (小烧), 3 medium (中烧), 4 large (大烧);
+half grades (2.5 = 小到中烧) are allowed. baseline, if present, is another
+forecaster's grade on the same scale and is scored the same way for comparison.
 
 For each row the archived GFS forecast (Open-Meteo Historical Forecast API) and
 CAMS AOD are fetched (cached in .cache/), the index is recomputed for every
@@ -28,7 +30,8 @@ def read_labels(path):
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             rows.append({"date": dt.date.fromisoformat(r["date"]), "lat": float(r["lat"]), "lon": float(r["lon"]),
-                         "event": r["event"].strip(), "observed": int(r["observed"]),
+                         "event": r["event"].strip(), "observed": float(r["observed"]),
+                         "baseline": float(r["baseline"]) if r.get("baseline") not in (None, "") else None,
                          "source": r.get("source", ""), "note": r.get("note", "")})
     return rows
 
@@ -39,7 +42,7 @@ def make_columns(model, memo):
         key = (tuple(points), t)
         if key not in memo:
             memo[key] = sg.fetch_raw(points, t - dt.timedelta(hours=2), t + dt.timedelta(hours=2), model,
-                                     request=glowmap.cached_request, url=sg.HISTORICAL_URL)
+                                     request=glowmap.cached_request, url=sg.HISTORICAL_URL, cloud_only=True)
         return [sg.raw_to_column(r, t) for r in memo[key]]
     return columns
 
@@ -112,7 +115,9 @@ def main():
     ap.add_argument("labels", help="labels CSV (date,lat,lon,event,observed[,source,note])")
     ap.add_argument("--model", default="gfs_seamless")
     ap.add_argument("--haze-heights", type=floats, default=[1.0, 1.5, 2.5], help="aerosol scale heights to try, km")
-    ap.add_argument("--beta-scales", type=floats, default=[0.5, 1.0, 2.0], help="cloud extinction multipliers to try")
+    ap.add_argument("--beta-scales", type=floats, default=[1.0], help="cloud extinction multipliers to try")
+    ap.add_argument("--element-kms", type=floats, default=[0.0, 10.0, 30.0, 100.0],
+                    help="cloud element sizes to try, km (0 = uniform c*beta, the old model)")
     ap.add_argument("--fast", action="store_true", help="coarser time/angle steps (map settings)")
     ap.add_argument("--out", default="backtest_results.csv")
     args = ap.parse_args()
@@ -124,25 +129,31 @@ def main():
     observed = [r["observed"] for r in rows]
     good = [o >= 2 for o in observed]
     print("%d labelled events, %d with observed >= 2" % (len(rows), sum(good)))
+    base = [r["baseline"] for r in rows]
+    if all(b is not None for b in base):
+        print("baseline forecaster: spearman %+.2f   AUC(>=2) %.2f" % (spearman(base, observed), auc(base, good)))
 
     results = []
-    for haze, beta in itertools.product(args.haze_heights, args.beta_scales):
+    for haze, beta, elem in itertools.product(args.haze_heights, args.beta_scales, args.element_kms):
         sg.CLOUD_BETA_SCALE = beta
+        sg.CLOUD_ELEMENT_KM = elem
         scores = []
         for r in rows:
             f = sg.forecast(r["lat"], r["lon"], r["event"], r["date"], columns, haze, **steps)
             scores.append(f["index"])
         rho, a = spearman(scores, observed), auc(scores, good)
-        results.append((rho, a, haze, beta, scores))
-        print("  haze %.1f km  beta x%.1f   spearman %+.2f   AUC(>=2) %.2f" % (haze, beta, rho, a), file=sys.stderr)
+        results.append((rho, a, haze, beta, elem, scores))
+        print("  haze %.1f km  beta x%.1f  element %4.0f km   spearman %+.2f   AUC(>=2) %.2f"
+              % (haze, beta, elem, rho, a), file=sys.stderr)
 
     # NaN-safe ranking: Spearman first, AUC as tie-break
     def key(res):
         return tuple(-1e9 if v != v else v for v in res[:2])
 
-    rho, a, haze, beta, scores = max(results, key=key)
+    rho, a, haze, beta, elem, scores = max(results, key=key)
     print()
-    print("best: haze-height %.1f km, cloud beta x%.1f  (spearman %+.2f, AUC %.2f)" % (haze, beta, rho, a))
+    print("best: haze-height %.1f km, cloud beta x%.1f, element %.0f km  (spearman %+.2f, AUC %.2f)"
+          % (haze, beta, elem, rho, a))
     cuts = fit_thresholds(scores, observed)
     names = ["微烧", "小烧", "中烧", "大烧"]
     print("index thresholds:", "  ".join("%s>=%s" % (n, "%.2f" % c if c is not None else "?")
@@ -152,9 +163,10 @@ def main():
 
     with open(args.out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["date", "lat", "lon", "event", "observed", "index", "source", "note"])
+        w.writerow(["date", "lat", "lon", "event", "observed", "baseline", "index", "source", "note"])
         for r, s in zip(rows, scores):
-            w.writerow([r["date"], r["lat"], r["lon"], r["event"], r["observed"], "%.3f" % s, r["source"], r["note"]])
+            w.writerow([r["date"], r["lat"], r["lon"], r["event"], r["observed"], r["baseline"], "%.3f" % s,
+                        r["source"], r["note"]])
     print("per-event results: %s" % args.out)
 
 

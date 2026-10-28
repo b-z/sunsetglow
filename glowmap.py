@@ -186,7 +186,7 @@ def main():
     ap.add_argument("--event", choices=["sunset", "sunrise"], default="sunset")
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
     ap.add_argument("--model", default="gfs_seamless")
-    ap.add_argument("--haze-height", type=float, default=1.5)
+    ap.add_argument("--haze-height", type=float, default=1.0)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--out", default="map.html")
     args = ap.parse_args()

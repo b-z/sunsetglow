@@ -20,7 +20,7 @@ def run(cloud_z, edge_km, aod, label):
         col = s.render_column(sec, s.illumination_field(sec, dep, 1.5), 1.5, angles)
         g = [s.pixel_glow(p) for p in col]
         cov.append(sum(w * sat for w, sat in g) / len(g))
-    print("%-34s index %.2f  lit-steps %d" % (label, sum(c * 2 for c in cov) / 3, sum(c > 0.02 for c in cov)))
+    print("%-34s index %.2f  lit-steps %d" % (label, sum(c * 2 for c in cov) / 6, sum(c > 0.02 for c in cov)))
 
 
 run(9.2, 100, 0.1, "cirrus 9 km, edge +100 km, clean")

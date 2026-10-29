@@ -102,7 +102,8 @@ class GridField:
         return [self.column(la, lo, t) for la, lo in points]
 
 
-def build_field(bbox, event, date, model, step):
+def grid_extent(bbox, event, date, step, x_max):
+    """Regular grid covering the map extended from X_MIN to x_max km along the sun azimuth."""
     s, n, w, e = bbox
     clat, clon = (s + n) / 2, (w + e) / 2
     t_c = sg.find_event(date, clat, clon, event)
@@ -111,7 +112,7 @@ def build_field(bbox, event, date, model, step):
     for la in (s, clat, n):
         for lo in (w, clon, e):
             times.append(sg.find_event(date, la, lo, event))
-            for d in (sg.X_MIN, sg.X_MAX):
+            for d in (sg.X_MIN, x_max):
                 p = sg.destination(la, lo, az, d)
                 lats.append(p[0])
                 lons.append(p[1])
@@ -120,6 +121,37 @@ def build_field(bbox, event, date, model, step):
     nlat = int(math.ceil((max(lats) - lat0) / step)) + 1
     nlon = int(math.ceil((max(lons) - lon0) / step)) + 1
     pts = [(lat0 + i * step, lon0 + j * step) for i in range(nlat) for j in range(nlon)]
+    return lat0, lon0, nlat, nlon, pts, times
+
+
+class TerrainGrid:
+    """Elevation grid (m) with bilinear lookup; callable as forecast(terrain=...)."""
+
+    def __init__(self, lat0, lon0, nlat, nlon, step, elev):
+        self.lat0, self.lon0, self.nlat, self.nlon, self.step, self.elev = lat0, lon0, nlat, nlon, step, elev
+
+    def at(self, lat, lon):
+        fi = min(max((lat - self.lat0) / self.step, 0.0), self.nlat - 1.000001)
+        fj = min(max((lon - self.lon0) / self.step, 0.0), self.nlon - 1.000001)
+        i, j = int(fi), int(fj)
+        di, dj = fi - i, fj - j
+        e = self.elev
+        k = i * self.nlon + j
+        return ((e[k] * (1 - dj) + e[k + 1] * dj) * (1 - di)
+                + (e[k + self.nlon] * (1 - dj) + e[k + self.nlon + 1] * dj) * di)
+
+    def __call__(self, points):
+        return [self.at(la, lo) for la, lo in points]
+
+
+def build_terrain(bbox, event, date, step):
+    lat0, lon0, nlat, nlon, pts, _ = grid_extent(bbox, event, date, step, sg.TERRAIN_X_MAX)
+    print("terrain %d x %d nodes (%.2f°)" % (nlat, nlon, step), file=sys.stderr)
+    return TerrainGrid(lat0, lon0, nlat, nlon, step, sg.fetch_elevation(pts, request=cached_request))
+
+
+def build_field(bbox, event, date, model, step):
+    lat0, lon0, nlat, nlon, pts, times = grid_extent(bbox, event, date, step, sg.X_MAX)
     t0, t1 = min(times) - dt.timedelta(hours=2), max(times) + dt.timedelta(hours=2)
     print("field %d x %d nodes (%.2f°), %s .. %s UTC" % (nlat, nlon, step, t0.strftime("%H:%M"),
                                                          t1.strftime("%H:%M")), file=sys.stderr)
@@ -133,18 +165,19 @@ def build_field(bbox, event, date, model, step):
 
 _FIELD = None
 _OPTS = None
+_TERRAIN = None
 
 
-def _init(field, opts):
-    global _FIELD, _OPTS
-    _FIELD, _OPTS = field, opts
+def _init(field, opts, terrain):
+    global _FIELD, _OPTS, _TERRAIN
+    _FIELD, _OPTS, _TERRAIN = field, opts, terrain
 
 
 def _work(pt):
     lat, lon = pt
     try:
         r = sg.forecast(lat, lon, _OPTS["event"], _OPTS["date"], _FIELD.columns, _OPTS["haze"],
-                        offsets=MAP_OFFSETS, angles=MAP_ANGLES)
+                        offsets=MAP_OFFSETS, angles=MAP_ANGLES, terrain=_TERRAIN)
     except SystemExit:  # polar day/night
         return None
     return {
@@ -155,14 +188,14 @@ def _work(pt):
     }
 
 
-def compute_map(bbox, step, field, event, date, haze, workers):
+def compute_map(bbox, step, field, event, date, haze, workers, terrain=None):
     s, n, w, e = bbox
     pts = [(s + i * step, w + j * step)
            for i in range(int(round((n - s) / step)) + 1) for j in range(int(round((e - w) / step)) + 1)]
     print("forecasting %d map points on %d workers ..." % (len(pts), workers), file=sys.stderr)
     opts = {"event": event, "date": date, "haze": haze}
     t = time.time()
-    with multiprocessing.Pool(workers, initializer=_init, initargs=(field, opts)) as pool:
+    with multiprocessing.Pool(workers, initializer=_init, initargs=(field, opts, terrain)) as pool:
         res = []
         for k, r in enumerate(pool.imap(_work, pts, chunksize=4)):
             res.append(r)
@@ -192,6 +225,8 @@ def main():
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
     ap.add_argument("--model", default="gfs025")
     ap.add_argument("--haze-height", type=float, default=1.0)
+    ap.add_argument("--terrain-step", type=float, default=0.05,
+                    help="terrain grid resolution, degrees (default 0.05; 0 = flat Earth)")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--out", default="map.html")
     args = ap.parse_args()
@@ -199,7 +234,8 @@ def main():
     bbox = tuple(float(v) for v in args.bbox.split(","))
     date = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
     field = build_field(bbox, args.event, date, args.model, args.field_step)
-    cells = compute_map(bbox, args.step, field, args.event, date, args.haze_height, args.workers)
+    terrain = build_terrain(bbox, args.event, date, args.terrain_step) if args.terrain_step > 0 else None
+    cells = compute_map(bbox, args.step, field, args.event, date, args.haze_height, args.workers, terrain)
     meta = {"event": args.event, "date": date.isoformat(), "model": args.model, "bbox": bbox,
             "step": args.step, "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     write_html(args.out, meta, cells)

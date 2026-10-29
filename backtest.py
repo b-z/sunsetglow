@@ -120,12 +120,14 @@ def main():
                     help="cloud element sizes to try, km (0 = uniform c*beta, the old model)")
     ap.add_argument("--good", type=float, default=2.0, help="observed grade counted as positive for AUC (default 2)")
     ap.add_argument("--fast", action="store_true", help="coarser time/angle steps (map settings)")
+    ap.add_argument("--flat", action="store_true", help="ignore terrain")
     ap.add_argument("--out", default="backtest_results.csv")
     args = ap.parse_args()
 
     rows = read_labels(args.labels)
     memo = {}
     columns = make_columns(args.model, memo)
+    terrain = None if args.flat else (lambda pts: sg.fetch_elevation(pts, request=glowmap.cached_request))
     steps = dict(offsets=glowmap.MAP_OFFSETS, angles=glowmap.MAP_ANGLES) if args.fast else {}
     observed = [r["observed"] for r in rows]
     good = [o >= args.good for o in observed]
@@ -140,7 +142,7 @@ def main():
         sg.CLOUD_ELEMENT_KM = elem
         scores = []
         for r in rows:
-            f = sg.forecast(r["lat"], r["lon"], r["event"], r["date"], columns, haze, **steps)
+            f = sg.forecast(r["lat"], r["lon"], r["event"], r["date"], columns, haze, terrain=terrain, **steps)
             scores.append(f["index"])
         rho, a = spearman(scores, observed), auc(scores, good)
         results.append((rho, a, haze, beta, elem, scores))

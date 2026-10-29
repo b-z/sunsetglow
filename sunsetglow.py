@@ -9,7 +9,7 @@ Method (following the ideas in sunsetbot's public tutorial, chapters 1-4):
   3. For every cloudy cell and every minute around sunset, trace the sunlight
      ray back toward the sun on a curved Earth (parabola in flattened coords),
      integrating Rayleigh + aerosol + cloud extinction at 450/550/650 nm.
-     A ray that hits the ground is blocked.
+     A ray that hits the terrain (Copernicus DEM profile along the azimuth) is blocked.
   4. Render what the observer sees: march sightlines across the meridian arc
      (sun-side horizon -> zenith -> anti-sun horizon), accumulate lit cloud
      along each line, attenuated by cloud/haze in front.
@@ -45,6 +45,11 @@ LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450,
 X_MIN, X_MAX, DX = -300.0, 700.0, 10.0  # cross-section along sun azimuth, km (+ = toward sun)
 Z_MAX, DZ = 13.0, 0.25  # km
 SAMPLE_STEP = 50.0  # km between model columns
+# terrain profile along the azimuth: elevation every TERRAIN_DX km out to TERRAIN_X_MAX (sun rays from
+# the far end of the section still skim the ground a few hundred km further on)
+TERRAIN_DX = 2.0
+TERRAIN_X_MAX = X_MAX + 300.0
+ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 
 
 # ---------------------------------------------------------------- sun (NOAA)
@@ -238,6 +243,22 @@ def interp_log_p(anchors, x):
             return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
 
+def fetch_elevation(points, request=None):
+    """Terrain height (m) of each point from Open-Meteo's elevation API (Copernicus DEM, 90 m)."""
+    request = request or http_json
+    out = []
+    for i in range(0, len(points), 100):  # API limit per request
+        chunk = points[i:i + 100]
+        for d in request(ELEVATION_URL, {"latitude": ",".join("%.4f" % p[0] for p in chunk),
+                                         "longitude": ",".join("%.4f" % p[1] for p in chunk)}):
+            out += d["elevation"]
+    return [max(e or 0.0, 0.0) for e in out]  # sea / missing -> 0
+
+
+def terrain_xs():
+    return [X_MIN + n * TERRAIN_DX for n in range(int((TERRAIN_X_MAX - X_MIN) / TERRAIN_DX) + 1)]
+
+
 def fetch_columns(points, t, model):
     raws = fetch_raw(points, t - dt.timedelta(hours=2), t + dt.timedelta(hours=2), model)
     return [raw_to_column(r, t) for r in raws]
@@ -283,7 +304,9 @@ def effective_extinction(c, beta):
 
 
 class Section:
-    def __init__(self, cols, xs):
+    def __init__(self, cols, xs, terrain=None):
+        """terrain: elevations (m) at terrain_xs(), or None for a flat sea-level Earth."""
+        self._set_terrain(terrain)
         self.nx = int(round((X_MAX - X_MIN) / DX)) + 1
         self.nz = int(round(Z_MAX / DZ)) + 1
         self.ext = [[0.0] * self.nz for _ in range(self.nx)]  # cloud extinction km^-1
@@ -302,6 +325,27 @@ class Section:
                 c = c0 * (1 - f) + c1 * f
                 self.cf[i][k] = c
                 self.ext[i][k] = effective_extinction(c, b0 * (1 - f) + b1 * f)
+
+    def _set_terrain(self, terrain):
+        # ground (km) on a 1 km grid from X_MIN, linearly interpolated, for sightlines; ridge = ground
+        # dilated by +-3 km so sun rays marching in 5 km steps cannot skip over a narrow peak
+        n = int(TERRAIN_X_MAX - X_MIN) + 1
+        if not terrain:
+            self.ground = self.ridge = [0.0] * n
+            return
+        g = []
+        for m in range(n):
+            f = m / TERRAIN_DX
+            j = min(int(f), len(terrain) - 2)
+            g.append((terrain[j] + (terrain[j + 1] - terrain[j]) * (f - j)) / 1000.0)
+        self.ground = g
+        self.ridge = [max(g[max(m - 3, 0):m + 4]) for m in range(n)]
+
+    def ground_at(self, x, ridge=False):
+        m = int(round(x - X_MIN))
+        if m < 0 or m >= len(self.ground):
+            return 0.0  # beyond the profile: assume sea level
+        return (self.ridge if ridge else self.ground)[m]
 
     @staticmethod
     def _column_at(col, z):
@@ -343,11 +387,11 @@ def sun_ray_transmission(sec, x, z, depression, ha):
     while True:
         s += ds
         h = z - d_x * s + s * s / (2 * R_EARTH)
-        if h <= 0.0:
+        xs = x + s
+        if h <= sec.ground_at(xs, ridge=True):
             return (0.0, 0.0, 0.0)
         if h > 30.0 or s > 2500.0:
             break
-        xs = x + s
         i, k = sec.idx(xs, h)
         tau_r += math.exp(-h / H_RAYLEIGH) * ds
         a = sec.aod[i]
@@ -369,7 +413,7 @@ def illumination_field(sec, depression, ha):
     for i in range(sec.nx):
         x = X_MIN + i * DX
         for k in range(sec.nz):
-            if sec.cf[i][k] > 0.03:
+            if sec.cf[i][k] > 0.03 and (k + 1) * DZ > sec.ground_at(x):
                 # light enters a cloud through its bottom face, so start just below the cell
                 field[(i, k)] = sun_ray_transmission(sec, x, k * DZ - 0.01, depression, ha)
     return field
@@ -387,14 +431,17 @@ def render_column(sec, field, ha, angles):
         tau_r = tau_a = 0.0
         acc = [0.0, 0.0, 0.0]
         s = 0.0
+        z0 = sec.ground_at(0.0) + 0.002  # eye 2 m above the observer's ground
         while T > 0.01:
             ds = 1.0 if s < 100 else 2.0
             s += ds
             xh = s * ce
-            h = s * se + xh * xh / (2 * R_EARTH)
+            h = z0 + s * se + xh * xh / (2 * R_EARTH)
             x = dirx * xh
             if h > Z_MAX or x > X_MAX or x < X_MIN:
                 break
+            if h < sec.ground_at(x):
+                break  # mountains in front hide the rest of this sightline
             i, k = sec.idx(x, h)
             tau_r += math.exp(-h / H_RAYLEIGH) * ds
             tau_a += sec.aod[i] / ha * math.exp(-h / ha) * ds
@@ -478,10 +525,11 @@ DEFAULT_OFFSETS = list(range(-10, 46, 2))  # minutes after sunset (before sunris
 
 
 def forecast(lat, lon, event, date, columns, haze_height=1.0, offsets=DEFAULT_OFFSETS,
-             angles=DEFAULT_ANGLES, verbose=False):
+             angles=DEFAULT_ANGLES, verbose=False, terrain=None):
     """Glow forecast for one location.
 
     columns(points, t) -> list of columns (see raw_to_column) for (lat, lon) points at UTC t.
+    terrain(points) -> elevations (m), e.g. fetch_elevation; None = flat sea-level Earth.
     """
     t_event = find_event(date, lat, lon, event)
     _, az = sun_position(t_event, lat, lon)
@@ -489,7 +537,8 @@ def forecast(lat, lon, event, date, columns, haze_height=1.0, offsets=DEFAULT_OF
     t_mid = t_event + sign * dt.timedelta(minutes=15)
 
     xs = [X_MIN + i * SAMPLE_STEP for i in range(int((X_MAX - X_MIN) / SAMPLE_STEP) + 1)]
-    sec = Section(columns([destination(lat, lon, az, x) for x in xs], t_mid), xs)
+    relief = terrain([destination(lat, lon, az, x) for x in terrain_xs()]) if terrain else None
+    sec = Section(columns([destination(lat, lon, az, x) for x in xs], t_mid), xs, relief)
 
     strip, coverage = [], []
     for m in offsets:
@@ -516,6 +565,7 @@ def forecast(lat, lon, event, date, columns, haze_height=1.0, offsets=DEFAULT_OF
         "peak_offset": offsets[peak_i] * sign, "peak_coverage": coverage[peak_i],
         "color": to_display(best) if lit else None, "hue": hue_name(best) if lit else None,
         "aod": sec.aod[int(round(-X_MIN / DX))],
+        "elevation": sec.ground_at(0.0) * 1000.0,
         "strip": strip, "offsets": offsets, "angles": angles,
     }
 
@@ -528,13 +578,15 @@ def main():
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
     ap.add_argument("--model", default="gfs025", help="Open-Meteo model (default gfs025: pure GFS; gfs_seamless blends in HRRR over the US, which misses high cloud), e.g. ecmwf_ifs025")
     ap.add_argument("--haze-height", type=float, default=1.0, help="aerosol scale height km (default 1.0, from backtest)")
+    ap.add_argument("--flat", action="store_true", help="ignore terrain (flat sea-level Earth)")
     ap.add_argument("--png", help="write a panorama PNG (time x meridian angle)")
     args = ap.parse_args()
 
     date = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
     print("fetching model columns along the sun azimuth ...", file=sys.stderr)
     r = forecast(args.lat, args.lon, args.event, date,
-                 lambda pts, t: fetch_columns(pts, t, args.model), args.haze_height, verbose=True)
+                 lambda pts, t: fetch_columns(pts, t, args.model), args.haze_height, verbose=True,
+                 terrain=None if args.flat else fetch_elevation)
 
     print("%s %s UTC  sun azimuth %.1f°  model %s"
           % (args.event, r["event_utc"].strftime("%Y-%m-%d %H:%M"), r["azimuth"], args.model))
@@ -547,6 +599,7 @@ def main():
     else:
         print("预计无明显火烧云")
     print("本地 AOD            %.2f" % r["aod"])
+    print("观测点海拔          %.0f m%s" % (r["elevation"], "（--flat：忽略地形）" if args.flat else ""))
 
     if args.png:
         # rows = meridian angle (top = sun-side horizon), columns = time; 6x upscale in time

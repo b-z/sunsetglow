@@ -29,6 +29,17 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
 # ---------------------------------------------------------------- cached, chunked requests
 
+LIVE_TTL = 3 * 3600  # s; archived forecasts and terrain never expire
+
+
+def is_live(url, params):
+    """A forecast that can still change: not the archive, not terrain, and not entirely in the past."""
+    if "historical" in url or "elevation" in url:
+        return False
+    end = params.get("end_date")
+    return end is None or end >= (dt.date.today() - dt.timedelta(days=1)).isoformat()
+
+
 def cached_request(url, params):
     lats, lons = params["latitude"].split(","), params["longitude"].split(",")
     out = []
@@ -36,6 +47,8 @@ def cached_request(url, params):
         p = dict(params, latitude=",".join(lats[i:i + CHUNK]), longitude=",".join(lons[i:i + CHUNK]))
         full = url + "?" + urllib.parse.urlencode(p, safe=",")
         path = os.path.join(CACHE_DIR, hashlib.sha1(full.encode()).hexdigest() + ".json")
+        if os.path.exists(path) and is_live(url, params) and time.time() - os.path.getmtime(path) > LIVE_TTL:
+            os.remove(path)  # live forecast: a newer model run may be out
         if os.path.exists(path):
             try:
                 with open(path) as f:
@@ -43,15 +56,17 @@ def cached_request(url, params):
                 continue
             except ValueError:  # truncated by an interrupted run: refetch
                 os.remove(path)
-        for attempt in range(6):
+        for attempt in range(15):
             try:
                 data = sg.http_json(url, p)
                 break
             except SystemExit as e:
-                if "429" not in str(e) or attempt == 5:
+                if "429" not in str(e) or "daily" in str(e) or attempt == 14:
                     raise
-                print("  rate limited, waiting 65 s ...", file=sys.stderr)
-                time.sleep(65)
+                # the minutely limit clears in a minute; the hourly one (5000 weighted calls) needs longer
+                wait = 65 if attempt < 3 else 300
+                print("  rate limited, waiting %d s ..." % wait, file=sys.stderr)
+                time.sleep(wait)
         os.makedirs(CACHE_DIR, exist_ok=True)
         tmp = "%s.%d.tmp" % (path, os.getpid())
         with open(tmp, "w") as f:

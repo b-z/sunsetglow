@@ -133,6 +133,9 @@ def http_json(url, params):
                 time.sleep(5 * (attempt + 1))
     except urllib.error.HTTPError as e:
         if e.code == 429:
+            reason = e.read()[:300].decode("utf-8", "replace")
+            if "Daily" in reason:  # callers retry 429s, but this one only clears at 00:00 UTC
+                raise SystemExit("Open-Meteo daily limit exceeded (HTTP 429, 10000 weighted calls/day); retry after 00:00 UTC.")
             raise SystemExit("Open-Meteo rate limit hit (HTTP 429); each run costs ~60 weighted calls. Wait a minute and retry.")
         raise SystemExit("HTTP %d from %s: %s" % (e.code, url, e.read()[:300].decode("utf-8", "replace")))
     if isinstance(data, dict) and data.get("error"):

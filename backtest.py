@@ -127,7 +127,7 @@ def main():
     rows = read_labels(args.labels)
     memo = {}
     columns = make_columns(args.model, memo)
-    terrain = None if args.flat else (lambda pts: sg.fetch_elevation(pts, request=glowmap.cached_request))
+    terrain = None if args.flat else sg.fetch_elevation
     steps = dict(offsets=glowmap.MAP_OFFSETS, angles=glowmap.MAP_ANGLES) if args.fast else {}
     observed = [r["observed"] for r in rows]
     good = [o >= args.good for o in observed]

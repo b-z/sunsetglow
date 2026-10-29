@@ -9,19 +9,21 @@ Method (following the ideas in sunsetbot's public tutorial, chapters 1-4):
   3. For every cloudy cell and every minute around sunset, trace the sunlight
      ray back toward the sun on a curved Earth (parabola in flattened coords),
      integrating Rayleigh + aerosol + cloud extinction at 450/550/650 nm.
-     A ray that hits the terrain (Copernicus DEM profile along the azimuth) is blocked.
+     A ray that hits the terrain (elevation profile along the azimuth) is blocked.
   4. Render what the observer sees: march sightlines across the meridian arc
      (sun-side horizon -> zenith -> anti-sun horizon), accumulate lit cloud
      along each line, attenuated by cloud/haze in front.
   5. Summarise as glow coverage over time -> an (uncalibrated) vividness index,
      duration, peak time and colour; optionally write a PNG panorama strip.
 
-Pure standard library. Data: Open-Meteo (GFS / ECMWF) and CAMS, no API key.
+Pure standard library. Data: Open-Meteo (GFS / ECMWF) and CAMS, terrain from AWS Terrarium tiles; no API key.
 """
 import argparse
+import array
 import datetime as dt
 import json
 import math
+import os
 import struct
 import sys
 import time
@@ -49,7 +51,11 @@ SAMPLE_STEP = 50.0  # km between model columns
 # the far end of the section still skim the ground a few hundred km further on)
 TERRAIN_DX = 2.0
 TERRAIN_X_MAX = X_MAX + 300.0
-ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
+# terrain heights from the AWS Open Data "Terrarium" tiles (Mapzen/Tilezen, SRTM + others; no key). Zoom 8 is
+# ~500 m per pixel at 35 deg N; tiles are fetched once and cached for good, so terrain costs no Open-Meteo quota
+TERRAIN_TILES = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+TERRAIN_ZOOM = 8
+TILE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "terrain")
 
 
 # ---------------------------------------------------------------- sun (NOAA)
@@ -246,16 +252,116 @@ def interp_log_p(anchors, x):
             return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
 
-def fetch_elevation(points, request=None):
-    """Terrain height (m) of each point from Open-Meteo's elevation API (Copernicus DEM, 90 m)."""
-    request = request or http_json
+def decode_png(data):
+    """(width, height, rows) of an 8-bit RGB or RGBA, non-interlaced PNG; rows are bytes, 3 or 4 per pixel."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat = 8, []
+    while pos < len(data):
+        n, tag = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if tag == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if depth != 8 or ctype not in (2, 6) or interlace:
+                raise ValueError("unsupported PNG (depth %d, colour type %d)" % (depth, ctype))
+            bpp = 3 if ctype == 2 else 4
+        elif tag == b"IDAT":
+            idat.append(body)
+        pos += 12 + n
+    raw = zlib.decompress(b"".join(idat))
+    stride = w * bpp
+    rows, prev = [], bytearray(stride)
+    for y in range(h):
+        f = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        if f == 1:
+            for i in range(bpp, stride):
+                line[i] = (line[i] + line[i - bpp]) & 255
+        elif f == 2:
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 255
+        elif f == 3:
+            for i in range(stride):
+                left = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 255
+        elif f == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b, c = prev[i], prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        elif f != 0:
+            raise ValueError("bad PNG filter %d" % f)
+        rows.append(bytes(line))
+        prev = line
+    return w, h, rows
+
+
+_TILES = {}
+
+
+def terrain_tile(z, x, y):
+    """Elevations (m, sea and bathymetry clamped to 0) of one Terrarium tile as a flat 256*256 array."""
+    key = (z, x, y)
+    if key in _TILES:
+        return _TILES[key]
+    path = os.path.join(TILE_CACHE, "%d_%d_%d.png" % key)
+    if not os.path.exists(path):
+        url = TERRAIN_TILES.format(z=z, x=x, y=y)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(url, timeout=60) as r:
+                    data = r.read()
+                break
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == 2:
+                    raise SystemExit("cannot download terrain tile %s" % url)
+                time.sleep(5 * (attempt + 1))
+        decode_png(data)  # refuse to cache anything that is not a valid tile
+        os.makedirs(TILE_CACHE, exist_ok=True)
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    grid = path[:-4] + ".i16"  # decoded metres; decoding in pure Python takes ~1 s a tile, so do it once
+    if os.path.exists(grid):
+        elev = array.array("h")
+        with open(grid, "rb") as f:
+            elev.fromfile(f, 256 * 256)
+    else:
+        with open(path, "rb") as f:
+            w, h, rows = decode_png(f.read())
+        bpp = len(rows[0]) // w
+        elev = array.array("h", (min(32767, max(0, round(r[i] * 256 + r[i + 1] + r[i + 2] / 256 - 32768)))
+                                 for r in rows for i in range(0, w * bpp, bpp)))
+        tmp = "%s.%d.tmp" % (grid, os.getpid())
+        with open(tmp, "wb") as f:
+            elev.tofile(f)
+        os.replace(tmp, grid)
+    if len(_TILES) > 400:
+        _TILES.clear()
+    _TILES[key] = elev
+    return elev
+
+
+def fetch_elevation(points):
+    """Terrain height (m) of each (lat, lon), bilinear between Terrarium pixels."""
+    n = 256 * 2 ** TERRAIN_ZOOM  # pixels around the world
     out = []
-    for i in range(0, len(points), 100):  # API limit per request
-        chunk = points[i:i + 100]
-        for d in request(ELEVATION_URL, {"latitude": ",".join("%.4f" % p[0] for p in chunk),
-                                         "longitude": ",".join("%.4f" % p[1] for p in chunk)}):
-            out += d["elevation"]
-    return [max(e or 0.0, 0.0) for e in out]  # sea / missing -> 0
+    for lat, lon in points:
+        lat = min(max(lat, -85.0), 85.0)
+        px = (lon + 180.0) / 360.0 * n - 0.5  # pixel centres sit at +0.5
+        py = (1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * n - 0.5
+        x0, y0 = math.floor(px), math.floor(py)
+        fx, fy = px - x0, py - y0
+        v = 0.0
+        for dx, dy, wgt in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+            gx, gy = (x0 + dx) % n, min(max(y0 + dy, 0), n - 1)
+            tile = terrain_tile(TERRAIN_ZOOM, gx // 256, gy // 256)
+            v += wgt * tile[(gy % 256) * 256 + gx % 256]
+        out.append(v)
+    return out
 
 
 def terrain_xs():

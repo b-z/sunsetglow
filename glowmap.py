@@ -29,12 +29,12 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
 # ---------------------------------------------------------------- cached, chunked requests
 
-LIVE_TTL = 3 * 3600  # s; archived forecasts and terrain never expire
+LIVE_TTL = 3 * 3600  # s; archived forecasts never expire
 
 
 def is_live(url, params):
-    """A forecast that can still change: not the archive, not terrain, and not entirely in the past."""
-    if "historical" in url or "elevation" in url:
+    """A forecast that can still change: not the archive and not entirely in the past."""
+    if "historical" in url:
         return False
     end = params.get("end_date")
     return end is None or end >= (dt.date.today() - dt.timedelta(days=1)).isoformat()
@@ -139,32 +139,6 @@ def grid_extent(bbox, event, date, step, x_max):
     return lat0, lon0, nlat, nlon, pts, times
 
 
-class TerrainGrid:
-    """Elevation grid (m) with bilinear lookup; callable as forecast(terrain=...)."""
-
-    def __init__(self, lat0, lon0, nlat, nlon, step, elev):
-        self.lat0, self.lon0, self.nlat, self.nlon, self.step, self.elev = lat0, lon0, nlat, nlon, step, elev
-
-    def at(self, lat, lon):
-        fi = min(max((lat - self.lat0) / self.step, 0.0), self.nlat - 1.000001)
-        fj = min(max((lon - self.lon0) / self.step, 0.0), self.nlon - 1.000001)
-        i, j = int(fi), int(fj)
-        di, dj = fi - i, fj - j
-        e = self.elev
-        k = i * self.nlon + j
-        return ((e[k] * (1 - dj) + e[k + 1] * dj) * (1 - di)
-                + (e[k + self.nlon] * (1 - dj) + e[k + self.nlon + 1] * dj) * di)
-
-    def __call__(self, points):
-        return [self.at(la, lo) for la, lo in points]
-
-
-def build_terrain(bbox, event, date, step):
-    lat0, lon0, nlat, nlon, pts, _ = grid_extent(bbox, event, date, step, sg.TERRAIN_X_MAX)
-    print("terrain %d x %d nodes (%.2f°)" % (nlat, nlon, step), file=sys.stderr)
-    return TerrainGrid(lat0, lon0, nlat, nlon, step, sg.fetch_elevation(pts, request=cached_request))
-
-
 def build_field(bbox, event, date, model, step):
     lat0, lon0, nlat, nlon, pts, times = grid_extent(bbox, event, date, step, sg.X_MAX)
     t0, t1 = min(times) - dt.timedelta(hours=2), max(times) + dt.timedelta(hours=2)
@@ -240,8 +214,7 @@ def main():
     ap.add_argument("--date", help="local date YYYY-MM-DD (default: today)")
     ap.add_argument("--model", default="gfs025")
     ap.add_argument("--haze-height", type=float, default=1.0)
-    ap.add_argument("--terrain-step", type=float, default=0.05,
-                    help="terrain grid resolution, degrees (default 0.05; 0 = flat Earth)")
+    ap.add_argument("--flat", action="store_true", help="ignore terrain (flat sea-level Earth)")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--out", default="map.html")
     args = ap.parse_args()
@@ -249,7 +222,7 @@ def main():
     bbox = tuple(float(v) for v in args.bbox.split(","))
     date = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
     field = build_field(bbox, args.event, date, args.model, args.field_step)
-    terrain = build_terrain(bbox, args.event, date, args.terrain_step) if args.terrain_step > 0 else None
+    terrain = None if args.flat else sg.fetch_elevation  # Terrarium tiles, cached in .cache/terrain
     cells = compute_map(bbox, args.step, field, args.event, date, args.haze_height, args.workers, terrain)
     meta = {"event": args.event, "date": date.isoformat(), "model": args.model, "bbox": bbox,
             "step": args.step, "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

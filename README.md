@@ -19,7 +19,7 @@ python3 test_synthetic.py                               # 离线合成场景自�
 python3 glowmap.py --bbox 33,38,136,142 --date 2026-10-29 --out map_kanto.html   # S,N,W,E
 ```
 
-生成单文件网页（Leaflet），格子颜色 = 鲜艳度指数，点格子看日落时刻、持续时间、峰值、颜色、AOD
+生成单文件网页（Leaflet；日本范围用国土地理院淡色底图，地名为日文，其他地区用 Esri 底图），格子颜色 = 鲜艳度指数，点格子看日落时刻、持续时间、峰值、颜色、AOD
 和复现该点的命令。网页用浏览器本地时区显示时间。
 
 - 先拉一张共享模式场：覆盖地图范围，并朝太阳方向外扩 700 km、背向外扩 300 km，默认 0.5° 网格；
@@ -156,6 +156,7 @@ cirrus 9 km, no edge (overcast)    index 0.30   ← 无云边界：只有透过�
 
 ## 数据
 
+- 底图：[地理院タイル](https://maps.gsi.go.jp/development/ichiran.html)（日本）、Esri Canvas（其他地区）
 - 天气：[Open-Meteo](https://open-meteo.com/)（NOAA GFS、ECMWF IFS），CC BY 4.0
 - 气溶胶：CAMS Global，经 Open-Meteo Air Quality API
 - 地形：[Terrarium 高程瓦片](https://registry.opendata.aws/terrain-tiles/)（AWS Open Data，Mapzen/Tilezen 整合 SRTM 等），不占 Open-Meteo 额度

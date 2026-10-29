@@ -16,6 +16,7 @@
     }
   }
   :root[data-theme="dark"] { --bg: #121214; --panel: rgba(28,28,32,.94); --text: #eeeae6; --muted: #9a948e; --line: #34323a; }
+  #map.gsi .leaflet-overlay-pane canvas { mix-blend-mode: multiply; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font: 14px/1.45 -apple-system, "PingFang SC", "Hiragino Sans", system-ui, sans-serif; }
   #map { position: absolute; inset: 0; background: var(--bg); }
@@ -78,15 +79,22 @@ document.getElementById("scale").innerHTML = STOPS.map(s => `<span style="backgr
 const [S, N, W, E] = m.bbox;
 const map = L.map("map", { preferCanvas: true, zoomSnap: 0.25 }).fitBounds([[S, W], [N, E]]);
 const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-const tone = dark ? "Dark" : "Light";
-const esri = layer => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${tone}_Gray_${layer}/MapServer/tile/{z}/{y}/{x}`;
-L.tileLayer(esri("Base"), {
-  attribution: "底图 &copy; Esri · 数据 Open-Meteo (GFS/ECMWF), CAMS", maxZoom: 16,
-}).addTo(map);
-// labels above the glow cells
-map.createPane("labels").style.zIndex = 650;
+// Japan: GSI (地理院タイル) pale map with Japanese place names; elsewhere Esri canvas with English labels
+const inJapan = (S + N) / 2 > 20 && (S + N) / 2 < 46 && (W + E) / 2 > 122 && (W + E) / 2 < 154;
+const src = "数据 Open-Meteo (GFS/ECMWF), CAMS";
+map.createPane("labels").style.zIndex = 650;  // labels above the glow cells
 map.getPane("labels").style.pointerEvents = "none";
-L.tileLayer(esri("Reference"), { pane: "labels", maxZoom: 16 }).addTo(map);
+if (inJapan) {
+  // one light layer only; the cells are multiplied onto it (CSS below), so the place names stay readable
+  const att = '底图 <a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a> · ' + src;
+  L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png", { attribution: att, maxZoom: 18 }).addTo(map);
+  document.getElementById("map").classList.add("gsi");
+} else {
+  const tone = dark ? "Dark" : "Light";
+  const esri = layer => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${tone}_Gray_${layer}/MapServer/tile/{z}/{y}/{x}`;
+  L.tileLayer(esri("Base"), { attribution: "底图 &copy; Esri · " + src, maxZoom: 16 }).addTo(map);
+  L.tileLayer(esri("Reference"), { pane: "labels", maxZoom: 16 }).addTo(map);
+}
 
 function popup(c) {
   // c.peak is signed clock offset from the event: negative = earlier

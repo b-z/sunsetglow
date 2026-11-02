@@ -43,6 +43,20 @@ CLOUD_BETA_SCALE = 1.0  # multiplier on cloud extinction; tuned by backtest.py
 # on 87 eye-graded PhenoCam California events 30 km was about the best (AUC 0.67 at 0 -> 0.85 at 30, 0.83 at 100).
 CLOUD_ELEMENT_KM = 30.0
 LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200)
+# Thin mid/high sheets (altocumulus, cirrus) often fall between pressure levels, so the level cloud
+# cover misses them while the model's own column-integrated mid/high cloud cover sees them (Nahari,
+# Japan, 2026-11-02: medium-to-large glow from altocumulus with every level cloud ~0 near the observer,
+# GFS mid cloud 100%). Where a band has no level cloud at all, put a sheet of the diagnostic cover at one
+# level. Bands that already have level cloud are left alone: raising them too (the GFS diagnostic is
+# nearly 0/100) blocked the sun-side light and cut AUC 0.88 -> 0.77 (Shanghai) and 0.86 -> 0.76 (California).
+# Even empty-band filling is neutral on Shanghai (0.88) and slightly worse on California (0.84), and for Nahari
+# it only helps ECMWF (0 -> 0.35; GFS had moved the sheet east by sunset), so it is off by default (--diag).
+DIAG_CLOUD = False
+# band: (diagnostic variable, levels in the band, level to put the sheet at when the band is empty)
+DIAG_BANDS = (("cloud_cover_mid", (650, 600, 550, 500, 450, 400), 600),
+              ("cloud_cover_high", (350, 300, 250, 200), 300))
+# Open-Meteo's gfs025 (pressure levels) has no mid/high cloud cover; gfs_global is the same GFS run
+DIAG_MODELS = {"gfs025": "gfs_global"}
 
 X_MIN, X_MAX, DX = -300.0, 700.0, 10.0  # cross-section along sun azimuth, km (+ = toward sun)
 Z_MAX, DZ = 13.0, 0.25  # km
@@ -206,6 +220,11 @@ def fetch_raw(points, t0, t1, model, levels=LEVELS, request=None, cloud_only=Fal
             base, models=model, hourly=",".join("relative_humidity_%dhPa" % lv for lv in levels)))
         for w, r in zip(wx, rh):
             w["hourly"].update(r["hourly"])
+    if DIAG_CLOUD:
+        diag = request(url, dict(base, models=DIAG_MODELS.get(model, model),
+                                 hourly=",".join(b[0] for b in DIAG_BANDS)))
+        for w, d in zip(wx, diag):
+            w["hourly"].update({b[0]: d["hourly"][b[0]] for b in DIAG_BANDS})
     aq = request("https://air-quality-api.open-meteo.com/v1/air-quality", dict(base, hourly="aerosol_optical_depth"))
     return [{"times": parse_times(w["hourly"]["time"]), "hourly": w["hourly"],
              "atimes": parse_times(a["hourly"]["time"]), "aod": a["hourly"]["aerosol_optical_depth"]}
@@ -219,7 +238,7 @@ def raw_to_column(raw, t, levels=LEVELS):
                for lv in ANCHOR_LEVELS if "temperature_%dhPa" % lv in h]
     anchors = sorted(a for a in anchors if a[1] is not None)
     z500 = interp_hourly(h.get("geopotential_height_500hPa", [None] * len(times)), times, t)
-    layers = []
+    rows = {}
     for lv in levels:
         z = temp = None
         if "geopotential_height_%dhPa" % lv in h:
@@ -238,9 +257,19 @@ def raw_to_column(raw, t, levels=LEVELS):
             cc = rh_to_cloud(rh, temp) * 100 if rh is not None else None
         if z is None or temp is None or cc is None:
             continue
-        layers.append((z / 1000.0, temp, cc / 100.0))
+        rows[lv] = [z / 1000.0, temp, cc / 100.0]
+    if DIAG_CLOUD:
+        for var, band, default in DIAG_BANDS:
+            diag = interp_hourly(h[var], times, t) if var in h else None
+            band = [lv for lv in band if lv in rows]
+            if diag is None or not band:
+                continue
+            if max(rows[lv][2] for lv in band) >= 0.01:
+                continue
+            lv = default if default in rows else band[0]
+            rows[lv][2] = max(rows[lv][2], diag / 100.0)
     aod = interp_hourly(raw["aod"], raw["atimes"], t)
-    return {"layers": sorted(layers), "aod": aod if aod is not None else 0.2}
+    return {"layers": sorted(tuple(r) for r in rows.values()), "aod": aod if aod is not None else 0.2}
 
 
 def interp_log_p(anchors, x):
@@ -688,10 +717,13 @@ def main():
     ap.add_argument("--model", default="gfs025", help="Open-Meteo model (default gfs025: pure GFS; gfs_seamless blends in HRRR over the US, which misses high cloud), e.g. ecmwf_ifs025")
     ap.add_argument("--haze-height", type=float, default=1.0, help="aerosol scale height km (default 1.0, from backtest)")
     ap.add_argument("--flat", action="store_true", help="ignore terrain (flat sea-level Earth)")
+    ap.add_argument("--diag", action="store_true", help="fill cloud-free mid/high bands from the model's mid/high cloud cover")
     ap.add_argument("--png", help="write a panorama PNG (time x meridian angle)")
     args = ap.parse_args()
 
     date = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
+    global DIAG_CLOUD
+    DIAG_CLOUD = args.diag
     print("fetching model columns along the sun azimuth ...", file=sys.stderr)
     r = forecast(args.lat, args.lon, args.event, date,
                  lambda pts, t: fetch_columns(pts, t, args.model), args.haze_height, verbose=True,

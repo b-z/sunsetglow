@@ -121,12 +121,14 @@ def main():
     ap.add_argument("--good", type=float, default=2.0, help="observed grade counted as positive for AUC (default 2)")
     ap.add_argument("--fast", action="store_true", help="coarser time/angle steps (map settings)")
     ap.add_argument("--flat", action="store_true", help="ignore terrain")
+    ap.add_argument("--diag", action="store_true", help="fill cloud-free mid/high bands from the model's mid/high cloud cover")
     ap.add_argument("--out", default="backtest_results.csv")
     args = ap.parse_args()
 
     rows = read_labels(args.labels)
     memo = {}
     columns = make_columns(args.model, memo)
+    sg.DIAG_CLOUD = args.diag
     terrain = None if args.flat else sg.fetch_elevation
     steps = dict(offsets=glowmap.MAP_OFFSETS, angles=glowmap.MAP_ANGLES) if args.fast else {}
     observed = [r["observed"] for r in rows]

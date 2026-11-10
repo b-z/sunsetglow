@@ -1,2 +1,3 @@
 date,lat,lon,event,observed,source,note
-2026-11-02,33.418,134.023,sunset,3.5,field:repo owner,"Nahari, Kochi, beach facing Tosa Bay; altocumulus overhead and to the south lit pink after sunset (中到大烧)"
+2026-11-02,33.418,134.023,sunset,3.5,field:maintainer,"Nahari, Kochi, beach facing Tosa Bay; altocumulus overhead and to the south lit pink after sunset (中到大烧)"
+2026-11-10,35.70,139.70,sunset,4,field:maintainer,"Tokyo, high-rise view west with Mt Fuji visible; altocumulus deck from overhead to the western horizon lit deep red-orange after sunset, clear gap above the western horizon (大烧). Approximate viewpoint. Hindcast: gfs025 0.50, ecmwf_ifs025 0.78"
